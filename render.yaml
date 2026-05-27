@@ -3,8 +3,8 @@ services:
   - type: web
     name: frescopa-mcp
     runtime: node
-    buildCommand: npm install && npm run build
-    startCommand: npm run start:http
+    buildCommand: npm install --omit=dev
+    startCommand: node dist/http.js
     healthCheckPath: /health
     envVars:
       - key: NODE_VERSION
