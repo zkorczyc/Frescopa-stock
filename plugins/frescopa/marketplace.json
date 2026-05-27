@@ -1,0 +1,24 @@
+{
+  "name": "frescopa",
+  "owner": {
+    "name": "Zbigniew Korczyc",
+    "email": "zkorczyc@adobe.com"
+  },
+  "plugins": [
+    {
+      "name": "check-product-stock",
+      "source": "./skills/check-product-stock",
+      "description": "Check stock availability for a specific product across Frescopa stores"
+    },
+    {
+      "name": "store-inventory",
+      "source": "./skills/store-inventory",
+      "description": "Get full inventory for a specific Frescopa store location"
+    },
+    {
+      "name": "active-promotions",
+      "source": "./skills/active-promotions",
+      "description": "Show current active promotions and deals at Frescopa"
+    }
+  ]
+}
