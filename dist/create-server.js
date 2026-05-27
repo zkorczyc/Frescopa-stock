@@ -160,14 +160,47 @@ export function createFrescopaServer(supabase) {
             throw new Error(error.message);
         return jsonText({ products, regional_breakdown: data ?? [] });
     });
-    server.tool("frescopa_active_promotions", "Promotions valid today (valid_from / valid_to); includes promo_code when set (e.g. TEA820, COFFEE7).", {}, async () => {
+    server.tool("frescopa_active_promotions", "Promotion rules valid today (codes, % off, category or single-SKU scope).", {}, async () => {
         const today = new Date().toISOString().slice(0, 10);
         const { data, error } = await supabase
             .from("promotions")
-            .select("*, product:products(sku,name)")
+            .select("*, product:products(demo_product_id,sku,name,category)")
             .lte("valid_from", today)
             .gte("valid_to", today)
             .order("discount_percent", { ascending: false });
+        if (error)
+            throw new Error(error.message);
+        return jsonText({ as_of: today, promotions: data ?? [] });
+    });
+    server.tool("frescopa_products_on_promotion", "Products on promotion TODAY with sale price (promotional_price_cents). Uses view v_products_on_promotion — includes category-wide and SKU-specific deals.", {
+        category: z.enum(["coffee", "tea", "machines", "accessories"]).optional(),
+        promo_code: z.string().optional().describe("e.g. TEA820, MUSE20"),
+        scope: z.enum(["product", "category"]).optional().describe("product = SKU deal only; category = all in category"),
+    }, async ({ category, promo_code, scope }) => {
+        const today = new Date().toISOString().slice(0, 10);
+        let q = supabase.from("v_products_on_promotion").select("*").order("category").order("product_name");
+        if (category)
+            q = q.eq("category", category);
+        if (promo_code?.trim())
+            q = q.eq("promo_code", promo_code.trim());
+        if (scope)
+            q = q.eq("promotion_scope", scope);
+        const { data, error } = await q;
+        if (error)
+            throw new Error(error.message);
+        return jsonText({
+            as_of: today,
+            product_promotion_rows: data?.length ?? 0,
+            note: "One product may appear multiple times if several promos apply (category + SKU).",
+            products_on_promotion: data ?? [],
+        });
+    });
+    server.tool("frescopa_promotion_summary", "Count of SKUs covered per active promo code (category promos = many products).", {}, async () => {
+        const today = new Date().toISOString().slice(0, 10);
+        const { data, error } = await supabase
+            .from("v_promotion_summary")
+            .select("*")
+            .order("products_on_promotion", { ascending: false });
         if (error)
             throw new Error(error.message);
         return jsonText({ as_of: today, promotions: data ?? [] });
