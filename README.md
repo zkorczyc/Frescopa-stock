@@ -1,0 +1,1 @@
+# Frescopa-stock
