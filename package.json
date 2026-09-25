@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "description": "MCP server for Frescopa demo — inventory & promotions from Supabase",
+  "description": "MCP server for Frescopa demo — inventory & promotions from Neon",
   "scripts": {
     "build": "tsc",
     "start": "node dist/index.js",
@@ -16,9 +16,12 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.1",
-    "@supabase/supabase-js": "^2.49.1",
+    "@neon/config": "^1.7.3",
+    "@neon/env": "^1.4.4",
+    "@neondatabase/serverless": "^1.1.0",
     "dotenv": "^16.4.7",
     "express": "^5.2.1",
+    "mysql": "^2.18.1",
     "zod": "^3.24.2"
   },
   "devDependencies": {

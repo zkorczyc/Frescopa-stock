@@ -4,17 +4,18 @@
  * Endpoint: POST https://<host>/mcp
  * Optional: Authorization: Bearer <MCP_API_KEY>
  */
-import "dotenv/config";
-import type { Request, Response, NextFunction } from "express";
 import { createMcpExpressApp } from "@modelcontextprotocol/sdk/server/express.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import "dotenv/config";
+import type { NextFunction, Request, Response } from "express";
 import { createFrescopaServer } from "./create-server.js";
+import { getDatabase } from "./lib/database.js";
 import { optionalEnv } from "./lib/env.js";
-import { getSupabaseClient } from "./lib/supabase.js";
 
 const apiKey = optionalEnv("MCP_API_KEY");
 const host = optionalEnv("HOST") ?? "0.0.0.0";
 const port = Number(process.env.PORT ?? optionalEnv("MCP_PORT") ?? "3000");
+const database = getDatabase();
 
 function authMiddleware(req: Request, res: Response, next: NextFunction): void {
   if (!apiKey) {
@@ -41,7 +42,7 @@ app.get("/health", (_req, res) => {
 });
 
 app.post("/mcp", authMiddleware, async (req, res) => {
-  const server = createFrescopaServer(getSupabaseClient());
+  const server = createFrescopaServer(database);
   try {
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: undefined,

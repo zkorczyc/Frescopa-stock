@@ -1,10 +1,10 @@
-import type { SupabaseClient } from "@supabase/supabase-js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import type { DatabaseClient } from "./lib/database.js";
 import { jsonText } from "./lib/json.js";
 
 /** Shared MCP tool registrations for stdio and HTTP transports. */
-export function createFrescopaServer(supabase: SupabaseClient): McpServer {
+export function createFrescopaServer(sql: DatabaseClient): McpServer {
   const server = new McpServer({
     name: "frescopa",
     version: "1.1.0",
@@ -20,11 +20,14 @@ export function createFrescopaServer(supabase: SupabaseClient): McpServer {
         .describe("coffee | tea | machines | accessories"),
     },
     async ({ category }) => {
-      let q = supabase.from("products").select("*").eq("is_active", true).order("category").order("name");
-      if (category) q = q.eq("category", category);
-      const { data, error } = await q;
-      if (error) throw new Error(error.message);
-      return jsonText({ products: data ?? [] });
+      const data = await sql`
+        SELECT *
+        FROM public.products
+        WHERE is_active = true
+          AND (${category ?? null}::text IS NULL OR category = ${category ?? null})
+        ORDER BY category, name
+      `;
+      return jsonText({ products: data });
     }
   );
 
@@ -38,19 +41,18 @@ export function createFrescopaServer(supabase: SupabaseClient): McpServer {
       limit: z.number().int().min(1).max(100).optional().default(100),
     },
     async ({ region, country, city, limit }) => {
-      let q = supabase
-        .from("store_locations")
-        .select("code, city, name, region, country")
-        .order("region")
-        .order("country")
-        .order("city")
-        .limit(limit ?? 100);
-      if (region) q = q.eq("region", region);
-      if (country?.trim()) q = q.ilike("country", country.trim());
-      if (city?.trim()) q = q.ilike("city", city.trim());
-      const { data, error } = await q;
-      if (error) throw new Error(error.message);
-      return jsonText({ store_count: data?.length ?? 0, stores: data ?? [] });
+      const countryValue = country?.trim() || null;
+      const cityValue = city?.trim() || null;
+      const data = await sql`
+        SELECT code, city, name, region, country
+        FROM public.store_locations
+        WHERE (${region ?? null}::text IS NULL OR region = ${region ?? null})
+          AND (${countryValue}::text IS NULL OR country ILIKE ${countryValue})
+          AND (${cityValue}::text IS NULL OR city ILIKE ${cityValue})
+        ORDER BY region, country, city
+        LIMIT ${limit ?? 100}
+      `;
+      return jsonText({ store_count: data.length, stores: data });
     }
   );
 
@@ -64,30 +66,54 @@ export function createFrescopaServer(supabase: SupabaseClient): McpServer {
       country: z.string().optional(),
     },
     async ({ city, store_code, region, country }) => {
-      if (!city?.trim() && !store_code?.trim() && !region && !country?.trim()) {
+      const cityValue = city?.trim() || null;
+      const codeValue = store_code?.trim() || null;
+      const countryValue = country?.trim() || null;
+      if (!cityValue && !codeValue && !region && !countryValue) {
         throw new Error("Provide at least one of: city, store_code, region, country.");
       }
-      let storeQuery = supabase.from("store_locations").select("id, code, city, name, region, country");
-      if (store_code?.trim()) storeQuery = storeQuery.eq("code", store_code.trim());
-      if (city?.trim()) storeQuery = storeQuery.ilike("city", city.trim());
-      if (region) storeQuery = storeQuery.eq("region", region);
-      if (country?.trim()) storeQuery = storeQuery.ilike("country", country.trim());
 
-      const { data: stores, error: se } = await storeQuery;
-      if (se) throw new Error(se.message);
-      if (!stores?.length) return jsonText({ stores: [], inventory_lines: [], note: "No stores match the filter." });
+      const stores = await sql`
+        SELECT id, code, city, name, region, country
+        FROM public.store_locations
+        WHERE (${codeValue}::text IS NULL OR code = ${codeValue})
+          AND (${cityValue}::text IS NULL OR city ILIKE ${cityValue})
+          AND (${region ?? null}::text IS NULL OR region = ${region ?? null})
+          AND (${countryValue}::text IS NULL OR country ILIKE ${countryValue})
+      `;
+      if (!stores.length) {
+        return jsonText({ stores: [], inventory_lines: [], note: "No stores match the filter." });
+      }
 
-      const storeIds = stores.map((s) => s.id);
-      const { data: rows, error: ie } = await supabase
-        .from("inventory")
-        .select(
-          "qty_on_hand, updated_at, product:products(demo_product_id,sku,name,category,unit,base_price_cents,currency,image_url), store:store_locations(code,city,name,region,country)"
-        )
-        .in("store_id", storeIds)
-        .order("store_id");
-      if (ie) throw new Error(ie.message);
-
-      return jsonText({ stores, inventory_lines: rows ?? [] });
+      const storeIds = stores.map((store) => store.id);
+      const rows = await sql`
+        SELECT
+          i.qty_on_hand,
+          i.updated_at,
+          json_build_object(
+            'demo_product_id', p.demo_product_id,
+            'sku', p.sku,
+            'name', p.name,
+            'category', p.category,
+            'unit', p.unit,
+            'base_price_cents', p.base_price_cents,
+            'currency', p.currency,
+            'image_url', p.image_url
+          ) AS product,
+          json_build_object(
+            'code', s.code,
+            'city', s.city,
+            'name', s.name,
+            'region', s.region,
+            'country', s.country
+          ) AS store
+        FROM public.inventory i
+        JOIN public.products p ON p.id = i.product_id
+        JOIN public.store_locations s ON s.id = i.store_id
+        WHERE i.store_id = ANY(${storeIds}::uuid[])
+        ORDER BY i.store_id
+      `;
+      return jsonText({ stores, inventory_lines: rows });
     }
   );
 
@@ -100,52 +126,30 @@ export function createFrescopaServer(supabase: SupabaseClient): McpServer {
       in_stock_only: z.boolean().optional().default(false),
     },
     async ({ query: qstr, region, in_stock_only }) => {
-      const raw = qstr.trim();
-      const term = `%${raw}%`;
-      const base = () =>
-        supabase
-          .from("products")
-          .select("id, demo_product_id, sku, name, category, unit, base_price_cents, currency, image_url")
-          .eq("is_active", true);
-
-      const [{ data: byName, error: e1 }, { data: bySku, error: e2 }, { data: byDemo, error: e3 }] =
-        await Promise.all([
-          base().ilike("name", term),
-          base().ilike("sku", term),
-          base().ilike("demo_product_id", term),
-        ]);
-      if (e1) throw new Error(e1.message);
-      if (e2) throw new Error(e2.message);
-      if (e3) throw new Error(e3.message);
-      type P = NonNullable<typeof byName>[number];
-      const map = new Map<string, P>();
-      for (const row of [...(byName ?? []), ...(bySku ?? []), ...(byDemo ?? [])]) {
-        map.set(row.id, row);
+      const term = `%${qstr.trim()}%`;
+      const products = await sql`
+        SELECT id, demo_product_id, sku, name, category, unit, base_price_cents, currency, image_url
+        FROM public.products
+        WHERE is_active = true
+          AND (name ILIKE ${term} OR sku ILIKE ${term} OR demo_product_id ILIKE ${term})
+      `;
+      if (!products.length) {
+        return jsonText({ matches: [], note: "No products match the query." });
       }
-      const products = [...map.values()];
-      if (!products.length) return jsonText({ matches: [], note: "No products match the query." });
 
-      const ids = products.map((p) => p.id);
-      let invQuery = supabase
-        .from("inventory")
-        .select("qty_on_hand, product_id, store:store_locations(code,city,name,region,country)")
-        .in("product_id", ids);
-      if (in_stock_only) invQuery = invQuery.gt("qty_on_hand", 0);
-      const { data: inv, error: ie } = await invQuery;
-      if (ie) throw new Error(ie.message);
-
-      const filtered = region
-        ? (inv ?? []).filter((row) => {
-            const store = row.store as { region?: string } | null;
-            return store?.region === region;
-          })
-        : (inv ?? []);
-
-      return jsonText({
-        products,
-        inventory: filtered,
-        store_lines: filtered.length,
-      });
+      const productIds = products.map((product) => product.id);
+      const inventory = await sql`
+        SELECT
+          i.qty_on_hand,
+          i.product_id,
+          json_build_object('code', s.code, 'city', s.city, 'name', s.name, 'region', s.region, 'country', s.country) AS store
+        FROM public.inventory i
+        JOIN public.store_locations s ON s.id = i.store_id
+        WHERE i.product_id = ANY(${productIds}::uuid[])
+          AND (${in_stock_only} = false OR i.qty_on_hand > 0)
+          AND (${region ?? null}::text IS NULL OR s.region = ${region ?? null})
+      `;
+      return jsonText({ products, inventory, store_lines: inventory.length });
     }
   );
 
@@ -158,31 +162,24 @@ export function createFrescopaServer(supabase: SupabaseClient): McpServer {
     },
     async ({ query: qstr, region }) => {
       const term = `%${qstr.trim()}%`;
-      const base = () =>
-        supabase.from("products").select("demo_product_id, name, category").eq("is_active", true);
-      const [{ data: byName }, { data: byId }] = await Promise.all([
-        base().ilike("name", term).limit(3),
-        base().ilike("demo_product_id", term).limit(3),
-      ]);
-      const map = new Map<string, NonNullable<typeof byName>[number]>();
-      for (const row of [...(byName ?? []), ...(byId ?? [])]) {
-        map.set(row.demo_product_id, row);
-      }
-      const products = [...map.values()];
+      const products = await sql`
+        SELECT demo_product_id, name, category
+        FROM public.products
+        WHERE is_active = true
+          AND (name ILIKE ${term} OR demo_product_id ILIKE ${term})
+        LIMIT 6
+      `;
       if (!products.length) return jsonText({ note: "No product match." });
 
-      const ids = products.map((p) => p.demo_product_id);
-      let q = supabase
-        .from("v_inventory_by_region")
-        .select("*")
-        .in("demo_product_id", ids)
-        .order("region")
-        .order("country");
-      if (region) q = q.eq("region", region);
-      const { data, error } = await q;
-      if (error) throw new Error(error.message);
-
-      return jsonText({ products, regional_breakdown: data ?? [] });
+      const ids = products.map((product) => product.demo_product_id);
+      const data = await sql`
+        SELECT *
+        FROM public.v_inventory_by_region
+        WHERE demo_product_id = ANY(${ids}::text[])
+          AND (${region ?? null}::text IS NULL OR region = ${region ?? null})
+        ORDER BY region, country
+      `;
+      return jsonText({ products, regional_breakdown: data });
     }
   );
 
@@ -192,14 +189,22 @@ export function createFrescopaServer(supabase: SupabaseClient): McpServer {
     {},
     async () => {
       const today = new Date().toISOString().slice(0, 10);
-      const { data, error } = await supabase
-        .from("promotions")
-        .select("*, product:products(demo_product_id,sku,name,category)")
-        .lte("valid_from", today)
-        .gte("valid_to", today)
-        .order("discount_percent", { ascending: false });
-      if (error) throw new Error(error.message);
-      return jsonText({ as_of: today, promotions: data ?? [] });
+      const data = await sql`
+        SELECT
+          pr.*,
+          CASE WHEN p.id IS NULL THEN NULL ELSE json_build_object(
+            'demo_product_id', p.demo_product_id,
+            'sku', p.sku,
+            'name', p.name,
+            'category', p.category
+          ) END AS product
+        FROM public.promotions pr
+        LEFT JOIN public.products p ON p.id = pr.product_id
+        WHERE pr.valid_from <= ${today}::date
+          AND pr.valid_to >= ${today}::date
+        ORDER BY pr.discount_percent DESC
+      `;
+      return jsonText({ as_of: today, promotions: data });
     }
   );
 
@@ -213,17 +218,20 @@ export function createFrescopaServer(supabase: SupabaseClient): McpServer {
     },
     async ({ category, promo_code, scope }) => {
       const today = new Date().toISOString().slice(0, 10);
-      let q = supabase.from("v_products_on_promotion").select("*").order("category").order("product_name");
-      if (category) q = q.eq("category", category);
-      if (promo_code?.trim()) q = q.eq("promo_code", promo_code.trim());
-      if (scope) q = q.eq("promotion_scope", scope);
-      const { data, error } = await q;
-      if (error) throw new Error(error.message);
+      const promoCodeValue = promo_code?.trim() || null;
+      const data = await sql`
+        SELECT *
+        FROM public.v_products_on_promotion
+        WHERE (${category ?? null}::text IS NULL OR category = ${category ?? null})
+          AND (${promoCodeValue}::text IS NULL OR promo_code = ${promoCodeValue})
+          AND (${scope ?? null}::text IS NULL OR promotion_scope = ${scope ?? null})
+        ORDER BY category, product_name
+      `;
       return jsonText({
         as_of: today,
-        product_promotion_rows: data?.length ?? 0,
+        product_promotion_rows: data.length,
         note: "One product may appear multiple times if several promos apply (category + SKU).",
-        products_on_promotion: data ?? [],
+        products_on_promotion: data,
       });
     }
   );
@@ -234,12 +242,12 @@ export function createFrescopaServer(supabase: SupabaseClient): McpServer {
     {},
     async () => {
       const today = new Date().toISOString().slice(0, 10);
-      const { data, error } = await supabase
-        .from("v_promotion_summary")
-        .select("*")
-        .order("products_on_promotion", { ascending: false });
-      if (error) throw new Error(error.message);
-      return jsonText({ as_of: today, promotions: data ?? [] });
+      const data = await sql`
+        SELECT *
+        FROM public.v_promotion_summary
+        ORDER BY products_on_promotion DESC
+      `;
+      return jsonText({ as_of: today, promotions: data });
     }
   );
 
